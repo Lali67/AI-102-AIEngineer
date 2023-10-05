@@ -1,16 +1,30 @@
 ﻿using System;
+using System.IO;
+using System.Text;
+using System.Collections.Generic;
+using System.Net.Http;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Newtonsoft.Json.Linq;
 using Microsoft.Extensions.Configuration;
 using System.Threading.Tasks;
+using Azure.Core;
+using Azure.Core.Serialization;
 
 // Import namespaces
+//dotnet add package Microsoft.CognitiveServices.Speech --version 1.30.0
+using Microsoft.CognitiveServices.Speech;
+using Microsoft.CognitiveServices.Speech.Audio;
+using System.Media;
+using Azure;
+using Azure.AI.Language.Conversations;
 
 
 namespace speaking_clock_client
 {
     class Program
     {
-
+        private static SpeechConfig speechConfig;
         static async Task Main(string[] args)
         {
             try
@@ -18,17 +32,136 @@ namespace speaking_clock_client
                 // Get config settings from AppSettings
                 IConfigurationBuilder builder = new ConfigurationBuilder().AddJsonFile("appsettings.json");
                 IConfigurationRoot configuration = builder.Build();
-                string luAppId = configuration["LuAppID"];
-                string predictionRegion = configuration["LuPredictionRegion"];
-                string predictionKey = configuration["LuPredictionKey"];
+                string cogSvcKey = configuration["CognitiveServiceKey"];
+                string cogSvcRegion = configuration["CognitiveServiceRegion"];
+                //string luAppId = configuration["LuAppID"];
+                string predictionEndpoint = configuration["LSPredictionEndpoint"];
+                string predictionKey = configuration["LSPredictionKey"];
                 
                 // Configure speech service and get intent recognizer
+                speechConfig = SpeechConfig.FromSubscription(cogSvcKey, cogSvcRegion);
+                Console.WriteLine("Ready to use speech service in " + speechConfig.Region);
 
+                Uri endpoint = new Uri(predictionEndpoint);
+                AzureKeyCredential credential = new AzureKeyCredential(predictionKey);
+                ConversationAnalysisClient client = new ConversationAnalysisClient(endpoint, credential);
 
-                // Get the model from the AppID and add the intents we want to use
+                // Configure voice
+                //speechConfig.SpeechSynthesisVoiceName = "en-US-AriaNeural";
+                speechConfig.SpeechSynthesisVoiceName = "en-GB-LibbyNeural";
+                using SpeechSynthesizer speechSynthesizer = new SpeechSynthesizer(speechConfig);
 
+                // Get user input (until they enter "quit")
+                string userText = "";
+                while (userText.ToLower() != "quit")
+                {
+                    Console.WriteLine("\nEnter some text ('quit' to stop)");
+                    userText = Console.ReadLine();
+                    if (userText.ToLower() != "quit")
+                    {
 
-                // Process speech input
+                        // Call the Language service model to get intent and entities
+                        var projectName = "Clock";
+                        var deploymentName = "production";
+                        var data = new
+                        {
+                            analysisInput = new
+                            {
+                                conversationItem = new
+                                {
+                                    text = userText,
+                                    id = "1",
+                                    participantId = "1",
+                                }
+                            },
+                            parameters = new
+                            {
+                                projectName,
+                                deploymentName,
+                                // Use Utf16CodeUnit for strings in .NET.
+                                stringIndexType = "Utf16CodeUnit",
+                            },
+                            kind = "Conversation",
+                        };
+                        // Send request
+                        Response response = await client.AnalyzeConversationAsync(RequestContent.Create(data));
+                        dynamic conversationalTaskResult = response.Content.ToDynamicFromJson(JsonPropertyNames.CamelCase);
+                        dynamic conversationPrediction = conversationalTaskResult.Result.Prediction;   
+                        var options = new JsonSerializerOptions { WriteIndented = true };
+                        Console.WriteLine(JsonSerializer.Serialize(conversationalTaskResult, options));
+                        Console.WriteLine("--------------------\n");
+                        Console.WriteLine(userText);
+                        var topIntent = "";
+                        if (conversationPrediction.Intents[0].ConfidenceScore > 0.5)
+                        {
+                            topIntent = conversationPrediction.TopIntent;
+                        }
+                        
+                        // Apply the appropriate action
+                        switch (topIntent)
+                        {
+                            case "GetTime":
+                                var location = "local";           
+                                // Check for a location entity
+                                foreach (dynamic entity in conversationPrediction.Entities)
+                                {
+                                    if (entity.Category == "Location")
+                                    {
+                                        //Console.WriteLine($"Location Confidence: {entity.ConfidenceScore}");
+                                        location = entity.Text;
+                                    }
+                                }
+                                // Get the time for the specified location
+                                string timeResponse = GetTime(location);
+                                Console.WriteLine(timeResponse);
+                                // Speak the answer
+                                timeResponse = $"The time in {location} is" + timeResponse;
+                                SpeechSynthesisResult speak = await speechSynthesizer.SpeakTextAsync(timeResponse);
+                                if (speak.Reason != ResultReason.SynthesizingAudioCompleted)
+                                {
+                                    Console.WriteLine(speak.Reason);
+                                }
+                                break;
+                            case "GetDay":
+                                var date = DateTime.Today.ToShortDateString();            
+                                // Check for a Date entity
+                                foreach (dynamic entity in conversationPrediction.Entities)
+                                {
+                                    if (entity.Category == "Date")
+                                    {
+                                        //Console.WriteLine($"Location Confidence: {entity.ConfidenceScore}");
+                                        date = entity.Text;
+                                    }
+                                }            
+                                // Get the day for the specified date
+                                string dayResponse = GetDay(date);
+                                Console.WriteLine(dayResponse);
+                                break;
+                            case "GetDate":
+                                var day = DateTime.Today.DayOfWeek.ToString();
+                                // Check for entities            
+                                // Check for a Weekday entity
+                                foreach (dynamic entity in conversationPrediction.Entities)
+                                {
+                                    if (entity.Category == "Weekday")
+                                    {
+                                        //Console.WriteLine($"Location Confidence: {entity.ConfidenceScore}");
+                                        day = entity.Text;
+                                    }
+                                }          
+                                // Get the date for the specified day
+                                string dateResponse = GetDate(day);
+                                Console.WriteLine(dateResponse);
+                                break;
+                            default:
+                                // Some other intent (for example, "None") was predicted
+                                Console.WriteLine("Try asking me for the time, the day, or the date.");
+                                break;
+                        }
+                        
+                    }
+
+                }
 
 
             }
